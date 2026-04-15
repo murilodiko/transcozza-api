@@ -202,23 +202,36 @@ async def upload_etapa(trip_code: str, etapa: int, fotos: List[UploadFile] = Fil
 
     return {"success": True, "etapa": etapa, "fotos": len(foto_urls), "urls": foto_urls}
 
+def parse_emails(campo: str) -> List[str]:
+    """Aceita e-mails separados por vírgula ou ponto e vírgula"""
+    if not campo:
+        return []
+    emails = [e.strip() for e in campo.replace(";", ",").split(",")]
+    return [e for e in emails if e and "@" in e]
+
 async def _enviar_email_etapa(etapa, viagem, urls):
     destinatarios = []
     if etapa == 1:
-        if viagem.get("email_cliente"): destinatarios.append(viagem["email_cliente"])
+        destinatarios = parse_emails(viagem.get("email_cliente", ""))
         assunto = f"📦 [{viagem['container']}] Retirada do Container Confirmada"
         corpo = base_email("Retirada do Container", "#00d4ff", "📦", viagem, fotos_html(urls))
     elif etapa == 2:
-        if viagem.get("email_operador"): destinatarios.append(viagem["email_operador"])
+        destinatarios = parse_emails(viagem.get("email_operador", ""))
         assunto = f"🗂️ [{viagem['container']}] CTE Carimbado Recebido"
         corpo = base_email("CTE Carimbado", "#ff6b35", "🗂️", viagem, fotos_html(urls))
     elif etapa == 3:
-        if viagem.get("email_cliente"): destinatarios.append(viagem["email_cliente"])
-        if viagem.get("email_despachante"): destinatarios.append(viagem["email_despachante"])
+        destinatarios = (
+            parse_emails(viagem.get("email_cliente", "")) +
+            parse_emails(viagem.get("email_despachante", ""))
+        )
         assunto = f"✅ [{viagem['container']}] Container Devolvido"
         corpo = base_email("Devolução do Container", "#00ff88", "✅", viagem, fotos_html(urls))
     else:
         return
+
+    # Remove duplicatas mantendo ordem
+    vistos = set()
+    destinatarios = [e for e in destinatarios if not (e in vistos or vistos.add(e))]
 
     sucesso = await enviar_email_resend(destinatarios, assunto, corpo)
     for dest in destinatarios:
