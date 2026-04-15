@@ -264,74 +264,60 @@ async def deletar_viagem(trip_code: str):
 def processar_cte_remover_valores(pdf_bytes: bytes, filename: str) -> bytes:
     """
     Remove a seção COMPONENTES DO VALOR DA PRESTAÇÃO DE SERVIÇO do CTE.
-    Mantém VALOR TOTAL DA CARGA. Retorna PDF como bytes.
-    Estratégia: rasterizar página, pintar retângulo branco, reexportar como PDF.
+    Usa pypdfium2 (binários embutidos, sem dependência do sistema).
     """
-    # Salvar PDF temporariamente
+    import pypdfium2 as pdfium
+
     with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as tmp_in:
         tmp_in.write(pdf_bytes)
         tmp_in_path = tmp_in.name
 
     try:
-        # Detectar coordenadas da seção de valores via pdfplumber
+        # Detectar coordenadas via pdfplumber
         with pdfplumber.open(tmp_in_path) as pdf:
             page = pdf.pages[0]
-            page_height_pts = page.height  # altura em pontos PDF
+            page_height_pts = page.height
             page_width_pts = page.width
             words = page.extract_words()
 
-        # Encontrar y_top (início de COMPONENTES) e y_bottom (fim de VALOR TOTAL A RECEBER)
-        y_tops = []
-        y_bots = []
+        y_tops, y_bots = [], []
         for w in words:
             txt = w['text'].upper()
             if 'COMPONENTES' in txt and w['top'] > 400:
                 y_tops.append(w['top'])
-            if ('RECEBER' in txt or 'SERVIÇO' in txt) and w['top'] > 500:
+            if ('RECEBER' in txt or ('SERVIÇO' in txt and w['top'] > 500)):
                 y_bots.append(w['bottom'])
 
-        if not y_tops:
-            # Fallback: usar coordenadas fixas baseadas no modelo padrão Bsoft TMS
-            y_top_plumber = 501.0
-            y_bot_plumber = 563.0
-        else:
-            y_top_plumber = min(y_tops) - 3
-            y_bot_plumber = max(y_bots) + 3
+        y_top_plumber = (min(y_tops) - 3) if y_tops else 501.0
+        y_bot_plumber = (max(y_bots) + 5) if y_bots else 565.0
 
-        # Rasterizar a 200dpi
-        dpi = 200
-        scale = dpi / 72.0
+        # Rasterizar com pypdfium2 (sem pdftoppm)
+        scale = 200 / 72.0
+        doc = pdfium.PdfDocument(tmp_in_path)
+        pdfium_page = doc[0]
+        bitmap = pdfium_page.render(scale=scale, rotation=0)
+        img = bitmap.to_pil().convert('RGB')
+        img_w, img_h = img.size
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            prefix = os.path.join(tmpdir, 'page')
-            subprocess.run(
-                ['pdftoppm', '-r', str(dpi), '-png', tmp_in_path, prefix],
-                check=True, capture_output=True
-            )
-            img_path = f"{prefix}-1.png"
-            img = Image.open(img_path).convert('RGB')
-            img_w, img_h = img.size
+        # Pintar retângulo branco
+        y_top_px = int(y_top_plumber * scale)
+        y_bot_px = int(y_bot_plumber * scale)
+        draw = ImageDraw.Draw(img)
+        draw.rectangle([0, y_top_px, img_w, y_bot_px], fill='white')
 
-            # Converter coordenadas pdfplumber → pixels
-            # pdfplumber: origem topo-esquerdo
-            y_top_px = int(y_top_plumber * scale)
-            y_bot_px = int(y_bot_plumber * scale)
-
-            # Pintar retângulo branco
-            draw = ImageDraw.Draw(img)
-            draw.rectangle([0, y_top_px, img_w, y_bot_px], fill='white')
-
-            # Converter imagem de volta para PDF
-            out_buf = io.BytesIO()
-            c = rl_canvas.Canvas(out_buf, pagesize=(page_width_pts, page_height_pts))
-            # Salvar imagem temporária para reportlab
-            tmp_img_path = os.path.join(tmpdir, 'modified.png')
-            img.save(tmp_img_path)
+        # Gerar PDF de saída
+        out_buf = io.BytesIO()
+        c = rl_canvas.Canvas(out_buf, pagesize=(page_width_pts, page_height_pts))
+        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp_img:
+            img.save(tmp_img.name)
+            tmp_img_path = tmp_img.name
+        try:
             c.drawImage(tmp_img_path, 0, 0, page_width_pts, page_height_pts)
-            c.save()
-
-            out_buf.seek(0)
-            return out_buf.read()
+        finally:
+            os.unlink(tmp_img_path)
+        c.save()
+        out_buf.seek(0)
+        return out_buf.read()
 
     finally:
         os.unlink(tmp_in_path)
