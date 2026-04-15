@@ -250,3 +250,137 @@ async def deletar_viagem(trip_code: str):
         raise HTTPException(status_code=404, detail="Viagem não encontrada")
     supabase.table("viagens").update({"status": "cancelada"}).eq("trip_code", trip_code.upper()).execute()
     return {"success": True}
+
+# ─── CTE: Remover valores ────────────────────────────────
+
+def processar_cte_remover_valores(pdf_bytes: bytes, filename: str) -> bytes:
+    """
+    Remove a seção COMPONENTES DO VALOR DA PRESTAÇÃO DE SERVIÇO do CTE.
+    Mantém VALOR TOTAL DA CARGA. Retorna PDF como bytes.
+    Estratégia: rasterizar página, pintar retângulo branco, reexportar como PDF.
+    """
+    import pdfplumber
+    from PIL import Image, ImageDraw
+    from reportlab.pdfgen import canvas as rl_canvas
+
+    # Salvar PDF temporariamente
+    with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as tmp_in:
+        tmp_in.write(pdf_bytes)
+        tmp_in_path = tmp_in.name
+
+    try:
+        # Detectar coordenadas da seção de valores via pdfplumber
+        with pdfplumber.open(tmp_in_path) as pdf:
+            page = pdf.pages[0]
+            page_height_pts = page.height  # altura em pontos PDF
+            page_width_pts = page.width
+            words = page.extract_words()
+
+        # Encontrar y_top (início de COMPONENTES) e y_bottom (fim de VALOR TOTAL A RECEBER)
+        y_tops = []
+        y_bots = []
+        for w in words:
+            txt = w['text'].upper()
+            if 'COMPONENTES' in txt and w['top'] > 400:
+                y_tops.append(w['top'])
+            if ('RECEBER' in txt or 'SERVIÇO' in txt) and w['top'] > 500:
+                y_bots.append(w['bottom'])
+
+        if not y_tops:
+            # Fallback: usar coordenadas fixas baseadas no modelo padrão Bsoft TMS
+            y_top_plumber = 501.0
+            y_bot_plumber = 563.0
+        else:
+            y_top_plumber = min(y_tops) - 3
+            y_bot_plumber = max(y_bots) + 3
+
+        # Rasterizar a 200dpi
+        dpi = 200
+        scale = dpi / 72.0
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            prefix = os.path.join(tmpdir, 'page')
+            subprocess.run(
+                ['pdftoppm', '-r', str(dpi), '-png', tmp_in_path, prefix],
+                check=True, capture_output=True
+            )
+            img_path = f"{prefix}-1.png"
+            img = Image.open(img_path).convert('RGB')
+            img_w, img_h = img.size
+
+            # Converter coordenadas pdfplumber → pixels
+            # pdfplumber: origem topo-esquerdo
+            y_top_px = int(y_top_plumber * scale)
+            y_bot_px = int(y_bot_plumber * scale)
+
+            # Pintar retângulo branco
+            draw = ImageDraw.Draw(img)
+            draw.rectangle([0, y_top_px, img_w, y_bot_px], fill='white')
+
+            # Converter imagem de volta para PDF
+            out_buf = io.BytesIO()
+            c = rl_canvas.Canvas(out_buf, pagesize=(page_width_pts, page_height_pts))
+            # Salvar imagem temporária para reportlab
+            tmp_img_path = os.path.join(tmpdir, 'modified.png')
+            img.save(tmp_img_path)
+            c.drawImage(tmp_img_path, 0, 0, page_width_pts, page_height_pts)
+            c.save()
+
+            out_buf.seek(0)
+            return out_buf.read()
+
+    finally:
+        os.unlink(tmp_in_path)
+
+
+@app.post("/cte/remover-valores")
+async def cte_remover_valores(arquivos: List[UploadFile] = File(...)):
+    """
+    Recebe um ou mais PDFs de CTE e retorna ZIP com os PDFs processados
+    (seção de valores removida).
+    """
+    import zipfile
+
+    resultados = []
+    erros = []
+
+    for arquivo in arquivos:
+        conteudo = await arquivo.read()
+        nome_original = arquivo.filename or "cte.pdf"
+        nome_saida = nome_original.replace('.pdf', '_sem_valores.pdf').replace('.PDF', '_sem_valores.pdf')
+
+        try:
+            pdf_processado = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda c=conteudo, n=nome_original: processar_cte_remover_valores(c, n)
+            )
+            resultados.append((nome_saida, pdf_processado))
+        except Exception as e:
+            erros.append(f"{nome_original}: {str(e)}")
+
+    if not resultados:
+        raise HTTPException(status_code=500, detail=f"Erro ao processar: {'; '.join(erros)}")
+
+    # Se apenas 1 arquivo, retornar PDF direto
+    if len(resultados) == 1 and not erros:
+        nome, dados = resultados[0]
+        return StreamingResponse(
+            io.BytesIO(dados),
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="{nome}"'}
+        )
+
+    # Múltiplos arquivos: retornar ZIP
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for nome, dados in resultados:
+            zf.writestr(nome, dados)
+        if erros:
+            zf.writestr('ERROS.txt', '\n'.join(erros))
+
+    zip_buf.seek(0)
+    return StreamingResponse(
+        zip_buf,
+        media_type="application/zip",
+        headers={"Content-Disposition": 'attachment; filename="ctes_sem_valores.zip"'}
+    )
