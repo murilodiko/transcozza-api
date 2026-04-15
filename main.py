@@ -281,8 +281,8 @@ def processar_cte_remover_valores(pdf_bytes: bytes, filename: str) -> bytes:
     # Detectar bordas laterais do documento na área de valores
     x_lefts  = [l['x0'] for l in lines if abs(l['x0'] - l['x1']) < 1 and 490 < l['top'] < 570]
     x_rights = [l['x1'] for l in lines if abs(l['x0'] - l['x1']) < 1 and 490 < l['top'] < 570]
-    x_left  = min(x_lefts)  if x_lefts  else 20.0
-    x_right = max(x_rights) if x_rights else 575.0
+    x_left  = (min(x_lefts)  + 0.6) if x_lefts  else 20.6
+    x_right = (max(x_rights) - 0.6) if x_rights else 574.4
 
     # Detectar coordenadas da seção de valores
     y_tops, y_bots = [], []
