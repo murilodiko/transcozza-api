@@ -264,20 +264,27 @@ async def deletar_viagem(trip_code: str):
 def processar_cte_remover_valores(pdf_bytes: bytes, filename: str) -> bytes:
     """
     Remove a seção COMPONENTES DO VALOR DA PRESTAÇÃO DE SERVIÇO do CTE.
-    Usa overlay vetorial (merge_page over=True) — preserva qualidade total do PDF.
+    Replica exatamente o comportamento do iLovePDF:
+    retângulo branco dentro das bordas laterais, preservando linhas do documento.
     """
     from pypdf import PdfReader, PdfWriter
     from reportlab.lib.colors import white
 
     pdf_stream = io.BytesIO(pdf_bytes)
 
-    # Detectar coordenadas via pdfplumber
     with pdfplumber.open(pdf_stream) as pdf:
         page = pdf.pages[0]
-        ph = page.height
-        pw = page.width
+        ph, pw = page.height, page.width
         words = page.extract_words()
+        lines = page.lines
 
+    # Detectar bordas laterais do documento na área de valores
+    x_lefts  = [l['x0'] for l in lines if abs(l['x0'] - l['x1']) < 1 and 490 < l['top'] < 570]
+    x_rights = [l['x1'] for l in lines if abs(l['x0'] - l['x1']) < 1 and 490 < l['top'] < 570]
+    x_left  = min(x_lefts)  if x_lefts  else 20.0
+    x_right = max(x_rights) if x_rights else 575.0
+
+    # Detectar coordenadas da seção de valores
     y_tops, y_bots = [], []
     for w in words:
         txt = w['text'].upper()
@@ -286,23 +293,24 @@ def processar_cte_remover_valores(pdf_bytes: bytes, filename: str) -> bytes:
         if ('RECEBER' in txt or ('SERVIÇO' in txt and w['top'] > 500)):
             y_bots.append(w['bottom'])
 
-    y_top = (min(y_tops) - 2) if y_tops else 502.0
-    y_bot = min((max(y_bots) + 2) if y_bots else 562.0, 563.0)
+    y_top_pl = (min(y_tops) - 0.5) if y_tops else 502.0
+    y_bot_pl = min((max(y_bots) + 0.5) if y_bots else 562.0, 562.0)
 
-    # Coordenadas PDF (origem base-esquerda)
-    pdf_y_base = ph - y_bot
-    pdf_y_height = y_bot - y_top
+    # Converter para coords PDF (origem base-esquerda)
+    pdf_y_base  = ph - y_bot_pl
+    rect_height = y_bot_pl - y_top_pl
+    rect_width  = x_right - x_left
 
-    # Criar overlay vetorial com retângulo branco
+    # Criar overlay com retângulo branco DENTRO das bordas (igual iLovePDF)
     packet = io.BytesIO()
     c = rl_canvas.Canvas(packet, pagesize=(pw, ph))
     c.setFillColor(white)
     c.setStrokeColor(white)
-    c.rect(0, pdf_y_base, pw, pdf_y_height, fill=1, stroke=0)
+    c.rect(x_left, pdf_y_base, rect_width, rect_height, fill=1, stroke=0)
     c.save()
     packet.seek(0)
 
-    # Aplicar overlay POR CIMA do original (preserva vetores/bordas)
+    # Aplicar por cima do original
     overlay_reader = PdfReader(packet)
     original_reader = PdfReader(io.BytesIO(pdf_bytes))
     orig_page = original_reader.pages[0]
