@@ -12,6 +12,14 @@ import random
 import string
 import asyncio
 import httpx
+import tempfile
+import subprocess
+import zipfile
+import io
+from fastapi.responses import StreamingResponse
+from PIL import Image, ImageDraw
+from reportlab.pdfgen import canvas as rl_canvas
+import pdfplumber
 from datetime import datetime
 from supabase import create_client, Client
 from dotenv import load_dotenv
@@ -259,10 +267,6 @@ def processar_cte_remover_valores(pdf_bytes: bytes, filename: str) -> bytes:
     Mantém VALOR TOTAL DA CARGA. Retorna PDF como bytes.
     Estratégia: rasterizar página, pintar retângulo branco, reexportar como PDF.
     """
-    import pdfplumber
-    from PIL import Image, ImageDraw
-    from reportlab.pdfgen import canvas as rl_canvas
-
     # Salvar PDF temporariamente
     with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as tmp_in:
         tmp_in.write(pdf_bytes)
@@ -339,8 +343,6 @@ async def cte_remover_valores(arquivos: List[UploadFile] = File(...)):
     Recebe um ou mais PDFs de CTE e retorna ZIP com os PDFs processados
     (seção de valores removida).
     """
-    import zipfile
-
     resultados = []
     erros = []
 
