@@ -264,63 +264,57 @@ async def deletar_viagem(trip_code: str):
 def processar_cte_remover_valores(pdf_bytes: bytes, filename: str) -> bytes:
     """
     Remove a seção COMPONENTES DO VALOR DA PRESTAÇÃO DE SERVIÇO do CTE.
-    Usa pypdfium2 (binários embutidos, sem dependência do sistema).
+    Usa overlay vetorial (merge_page over=True) — preserva qualidade total do PDF.
     """
-    import pypdfium2 as pdfium
+    from pypdf import PdfReader, PdfWriter
+    from reportlab.lib.colors import white
 
-    with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as tmp_in:
-        tmp_in.write(pdf_bytes)
-        tmp_in_path = tmp_in.name
+    pdf_stream = io.BytesIO(pdf_bytes)
 
-    try:
-        # Detectar coordenadas via pdfplumber
-        with pdfplumber.open(tmp_in_path) as pdf:
-            page = pdf.pages[0]
-            page_height_pts = page.height
-            page_width_pts = page.width
-            words = page.extract_words()
+    # Detectar coordenadas via pdfplumber
+    with pdfplumber.open(pdf_stream) as pdf:
+        page = pdf.pages[0]
+        ph = page.height
+        pw = page.width
+        words = page.extract_words()
 
-        y_tops, y_bots = [], []
-        for w in words:
-            txt = w['text'].upper()
-            if 'COMPONENTES' in txt and w['top'] > 400:
-                y_tops.append(w['top'])
-            if ('RECEBER' in txt or ('SERVIÇO' in txt and w['top'] > 500)):
-                y_bots.append(w['bottom'])
+    y_tops, y_bots = [], []
+    for w in words:
+        txt = w['text'].upper()
+        if 'COMPONENTES' in txt and w['top'] > 400:
+            y_tops.append(w['top'])
+        if ('RECEBER' in txt or ('SERVIÇO' in txt and w['top'] > 500)):
+            y_bots.append(w['bottom'])
 
-        y_top_plumber = (min(y_tops) - 3) if y_tops else 501.0
-        y_bot_plumber = (max(y_bots) + 5) if y_bots else 565.0
+    y_top = (min(y_tops) - 2) if y_tops else 502.0
+    y_bot = min((max(y_bots) + 2) if y_bots else 562.0, 563.0)
 
-        # Rasterizar com pypdfium2 (sem pdftoppm)
-        scale = 200 / 72.0
-        doc = pdfium.PdfDocument(tmp_in_path)
-        pdfium_page = doc[0]
-        bitmap = pdfium_page.render(scale=scale, rotation=0)
-        img = bitmap.to_pil().convert('RGB')
-        img_w, img_h = img.size
+    # Coordenadas PDF (origem base-esquerda)
+    pdf_y_base = ph - y_bot
+    pdf_y_height = y_bot - y_top
 
-        # Pintar retângulo branco
-        y_top_px = int(y_top_plumber * scale)
-        y_bot_px = int(y_bot_plumber * scale)
-        draw = ImageDraw.Draw(img)
-        draw.rectangle([0, y_top_px, img_w, y_bot_px], fill='white')
+    # Criar overlay vetorial com retângulo branco
+    packet = io.BytesIO()
+    c = rl_canvas.Canvas(packet, pagesize=(pw, ph))
+    c.setFillColor(white)
+    c.setStrokeColor(white)
+    c.rect(0, pdf_y_base, pw, pdf_y_height, fill=1, stroke=0)
+    c.save()
+    packet.seek(0)
 
-        # Gerar PDF de saída
-        out_buf = io.BytesIO()
-        c = rl_canvas.Canvas(out_buf, pagesize=(page_width_pts, page_height_pts))
-        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp_img:
-            img.save(tmp_img.name)
-            tmp_img_path = tmp_img.name
-        try:
-            c.drawImage(tmp_img_path, 0, 0, page_width_pts, page_height_pts)
-        finally:
-            os.unlink(tmp_img_path)
-        c.save()
-        out_buf.seek(0)
-        return out_buf.read()
+    # Aplicar overlay POR CIMA do original (preserva vetores/bordas)
+    overlay_reader = PdfReader(packet)
+    original_reader = PdfReader(io.BytesIO(pdf_bytes))
+    orig_page = original_reader.pages[0]
+    orig_page.merge_page(overlay_reader.pages[0], over=True)
 
-    finally:
-        os.unlink(tmp_in_path)
+    writer = PdfWriter()
+    writer.add_page(orig_page)
+
+    out_buf = io.BytesIO()
+    writer.write(out_buf)
+    out_buf.seek(0)
+    return out_buf.read()
 
 
 @app.post("/cte/remover-valores")

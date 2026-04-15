@@ -9,4 +9,4 @@ email-validator==2.2.0
 pdfplumber==0.11.4
 Pillow==10.4.0
 reportlab==4.2.5
-pypdfium2==4.30.0
+pypdf==4.3.1
