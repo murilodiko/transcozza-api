@@ -17,6 +17,7 @@ import subprocess
 import zipfile
 import io
 from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse
 from PIL import Image, ImageDraw
 from reportlab.pdfgen import canvas as rl_canvas
 import pdfplumber
@@ -110,6 +111,10 @@ def base_email(titulo, cor, icone, viagem, extra):
 @app.get("/")
 def health():
     return {"status": "ok", "service": "Transcozza Viagens API", "version": "2.0.0"}
+
+@app.get("/minuta")
+def minuta_page():
+    return FileResponse("public/minuta.html")
 
 @app.post("/viagens")
 async def criar_viagem(body: CriarViagemRequest):
