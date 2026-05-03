@@ -116,6 +116,12 @@ def health():
 def minuta_page():
     return FileResponse("public/minuta.html")
 
+@app.get("/proxy-sheet")
+async def proxy_sheet(url: str):
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(url)
+        return Response(content=resp.content, media_type="text/csv")
+
 @app.post("/viagens")
 async def criar_viagem(body: CriarViagemRequest):
     trip_code = gerar_trip_code()
