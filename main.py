@@ -270,6 +270,111 @@ async def deletar_viagem(trip_code: str):
     supabase.table("viagens").update({"status": "cancelada"}).eq("trip_code", trip_code.upper()).execute()
     return {"success": True}
 
+# ─── Motoristas: Extrair documentos e salvar no Sheets ──
+
+ANTHROPIC_API_KEY_ENV   = os.getenv("ANTHROPIC_API_KEY")
+GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON")
+SPREADSHEET_ID          = os.getenv("SPREADSHEET_ID", "1p9gy-uUAoqyX0z11izLPLWwXH0e3QzbfE_B8xXyUPWc")
+SHEET_NAME              = os.getenv("SHEET_NAME", "Novos Motoristas")
+
+MOTORISTAS_SYSTEM_PROMPT = """Voce e um extrator de dados de documentos de motoristas de caminhao brasileiros.
+Analise as imagens/PDFs fornecidos e extraia os dados solicitados.
+Responda APENAS com um array JSON valido, sem markdown, sem explicacoes, sem blocos de codigo.
+Cada objeto no array representa um motorista/conjunto identificado nos documentos.
+Campos obrigatorios: nome, endereco, cpf, rg, cnh, placa_carreta, placa_cavalo, modelo, ano, cor.
+Se um campo nao for encontrado, use string vazia "".
+Exemplo: [{"nome":"Joao Silva","endereco":"Rua X, 123","cpf":"000.000.000-00","rg":"12.345.678","cnh":"12345678901","placa_carreta":"ABC1D23","placa_cavalo":"XYZ9876","modelo":"Scania R450","ano":"2020","cor":"Branco"}]"""
+
+
+def _get_sheets_service():
+    import json as _json
+    from google.oauth2 import service_account
+    from googleapiclient.discovery import build
+    if not GOOGLE_CREDENTIALS_JSON:
+        raise HTTPException(status_code=500, detail="GOOGLE_CREDENTIALS_JSON nao configurado")
+    creds = service_account.Credentials.from_service_account_info(
+        _json.loads(GOOGLE_CREDENTIALS_JSON),
+        scopes=["https://www.googleapis.com/auth/spreadsheets"]
+    )
+    return build("sheets", "v4", credentials=creds)
+
+
+def _ensure_header(service):
+    headers = ["Nome", "Endereco", "CPF", "RG", "CNH",
+               "Placa Carreta", "Placa Cavalo", "Modelo", "Ano", "Cor", "Data Cadastro"]
+    result = service.spreadsheets().values().get(
+        spreadsheetId=SPREADSHEET_ID, range=f"{SHEET_NAME}!A1:K1"
+    ).execute()
+    existing = result.get("values", [])
+    if not existing or existing[0] != headers:
+        service.spreadsheets().values().update(
+            spreadsheetId=SPREADSHEET_ID,
+            range=f"{SHEET_NAME}!A1",
+            valueInputOption="RAW",
+            body={"values": [headers]}
+        ).execute()
+
+
+@app.post("/motoristas/extrair")
+async def motoristas_extrair(files: List[UploadFile] = File(...)):
+    if not ANTHROPIC_API_KEY_ENV:
+        raise HTTPException(status_code=500, detail="ANTHROPIC_API_KEY nao configurado")
+
+    import base64 as _b64
+    content = []
+    for f in files:
+        data = await f.read()
+        b64 = _b64.b64encode(data).decode()
+        if f.content_type == "application/pdf":
+            content.append({"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": b64}})
+        else:
+            content.append({"type": "image", "source": {"type": "base64", "media_type": f.content_type or "image/jpeg", "data": b64}})
+
+    content.append({"type": "text", "text": "Extraia todos os dados de motoristas e conjuntos presentes nesses documentos."})
+
+    async with httpx.AsyncClient(timeout=60) as client:
+        resp = await client.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={"x-api-key": ANTHROPIC_API_KEY_ENV, "anthropic-version": "2023-06-01", "content-type": "application/json"},
+            json={"model": "claude-opus-4-5", "max_tokens": 2000, "system": MOTORISTAS_SYSTEM_PROMPT, "messages": [{"role": "user", "content": content}]}
+        )
+
+    if resp.status_code != 200:
+        raise HTTPException(status_code=502, detail=f"Erro na API Claude: {resp.text}")
+
+    raw = "".join(b.get("text", "") for b in resp.json().get("content", []))
+    raw = raw.replace("```json", "").replace("```", "").strip()
+
+    try:
+        import json as _json
+        dados = _json.loads(raw)
+    except Exception:
+        raise HTTPException(status_code=422, detail=f"IA retornou formato invalido: {raw}")
+
+    return {"dados": dados}
+
+
+class SalvarMotoristasPayload(BaseModel):
+    dados: List[dict]
+
+
+@app.post("/motoristas/salvar")
+def motoristas_salvar(payload: SalvarMotoristasPayload):
+    service = _get_sheets_service()
+    _ensure_header(service)
+    campos = ["nome", "endereco", "cpf", "rg", "cnh", "placa_carreta", "placa_cavalo", "modelo", "ano", "cor"]
+    hoje = datetime.now().strftime("%d/%m/%Y %H:%M")
+    rows = [[d.get(c, "") for c in campos] + [hoje] for d in payload.dados]
+    service.spreadsheets().values().append(
+        spreadsheetId=SPREADSHEET_ID,
+        range=f"{SHEET_NAME}!A:K",
+        valueInputOption="RAW",
+        insertDataOption="INSERT_ROWS",
+        body={"values": rows}
+    ).execute()
+    return {"salvos": len(rows)}
+
+
 # ─── CTE: Remover valores ────────────────────────────────
 
 def processar_cte_remover_valores(pdf_bytes: bytes, filename: str) -> bytes:
