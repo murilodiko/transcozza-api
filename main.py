@@ -116,6 +116,10 @@ def health():
 def minuta_page():
     return FileResponse("public/minuta.html")
 
+@app.get("/motoristas")
+def motoristas_page():
+    return FileResponse("public/motoristas.html")
+
 @app.get("/proxy-sheet")
 async def proxy_sheet(url: str):
     async with httpx.AsyncClient() as client:
